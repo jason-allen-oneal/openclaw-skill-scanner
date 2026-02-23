@@ -1,0 +1,6 @@
+[Unit]
+Description=OpenClaw: scan user skills when skills directory changes
+
+[Service]
+Type=oneshot
+ExecStart=%h/.openclaw/skills/skill-scanner-guard/scripts/auto_scan_user_skills.sh
