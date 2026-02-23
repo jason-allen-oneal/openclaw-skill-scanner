@@ -1,7 +1,14 @@
 ---
-name: skill-scanner-guard
-license: MIT
+name: openclaw-skill-scanner
 description: Security gate for OpenClaw AgentSkills. Scans folder/ClawHub skills with cisco-ai-defense/skill-scanner before installation. Supports manual scans, staged installs, and auto-quarantine of high-risk skills via systemd.
+binaries:
+  - uv
+  - npx
+  - git
+  - systemctl
+env:
+  - OPENCLAW_STATE_DIR
+  - OPENCLAW_WORKSPACE_DIR
 ---
 
 # Skill Scanner Guard
