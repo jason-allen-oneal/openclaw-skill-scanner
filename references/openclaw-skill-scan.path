@@ -1,0 +1,9 @@
+[Unit]
+Description=OpenClaw: watch ~/.openclaw/skills and trigger a scan
+
+[Path]
+PathModified=%h/.openclaw/skills
+PathChanged=%h/.openclaw/skills
+
+[Install]
+WantedBy=default.target
