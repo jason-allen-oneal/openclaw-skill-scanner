@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Test double for `uv run skill-scanner ...`
+# Controlled by FAKE_SCAN_*:
+#   FAKE_SCAN_EXIT   — process exit code (default 0)
+#   FAKE_SCAN_REPORT — markdown written to --output (default empty)
+set -euo pipefail
+
+out=""
+args=("$@")
+i=0
+while [[ $i -lt ${#args[@]} ]]; do
+  if [[ "${args[$i]}" == "--output" ]]; then
+    out="${args[$((i + 1))]:-}"
+  fi
+  i=$((i + 1))
+done
+
+if [[ -n "$out" ]]; then
+  printf '%s' "${FAKE_SCAN_REPORT-}" >"$out"
+fi
+
+exit "${FAKE_SCAN_EXIT:-0}"
