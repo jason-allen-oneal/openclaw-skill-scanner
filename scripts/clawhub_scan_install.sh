@@ -73,7 +73,9 @@ STATE_DIR="${OPENCLAW_STATE_DIR:-$HOME/.openclaw}"
 WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-$STATE_DIR/workspace}"
 STAGE_ROOT="$WORKSPACE_DIR/.skill_stage"
 mkdir -p "$STAGE_ROOT"
-STAGE_DIR="$(mktemp -d -p "$STAGE_ROOT" "clawhub-${SLUG}-XXXXXXXX")"
+# Do not embed $SLUG in the template — namespaced slugs contain '/'.
+STAGE_DIR="$(mktemp -d -p "$STAGE_ROOT" "clawhub-XXXXXXXX")"
+DEST_NAME="${SLUG##*/}"
 
 cleanup() {
   # Leave staging dir in place if debugging is needed.
@@ -91,17 +93,23 @@ fi
 # We keep everything inside the staging dir.
 ( cd "$STAGE_DIR" && npx -y clawhub --workdir "$STAGE_DIR" --dir skills "${INSTALL_ARGS[@]}" )
 
-CANDIDATE="$STAGE_DIR/skills/$SLUG"
-if [[ ! -d "$CANDIDATE" ]]; then
-  echo "ERROR: clawhub install did not produce expected folder: $CANDIDATE" >&2
+CANDIDATE=""
+for cand in "$STAGE_DIR/skills/$DEST_NAME" "$STAGE_DIR/skills/$SLUG"; do
+  if [[ -d "$cand" ]]; then
+    CANDIDATE="$cand"
+    break
+  fi
+done
+if [[ -z "$CANDIDATE" ]]; then
+  echo "ERROR: clawhub install did not produce expected folder under $STAGE_DIR/skills" >&2
   exit 3
 fi
 
 ADD_SCRIPT="$STATE_DIR/skills/skill-scanner-guard/scripts/scan_and_add_skill.sh"
 if [[ $FORCE -eq 1 ]]; then
-  "$ADD_SCRIPT" "$CANDIDATE" --name "$SLUG" --force
+  "$ADD_SCRIPT" "$CANDIDATE" --name "$DEST_NAME" --force
 else
-  "$ADD_SCRIPT" "$CANDIDATE" --name "$SLUG"
+  "$ADD_SCRIPT" "$CANDIDATE" --name "$DEST_NAME"
 fi
 
 # If we got here, the add script already copied into ~/.openclaw/skills.
