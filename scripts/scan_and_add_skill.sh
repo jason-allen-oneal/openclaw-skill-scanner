@@ -99,17 +99,19 @@ SCAN_CODE=$?
 set -e
 
 # Decide install policy:
-# - BLOCK only if High or Critical findings exist (unless --force)
+# - BLOCK if the scanner failed, the severity summary is missing, or
+#   High/Critical findings exist (unless --force)
 # - ALLOW Medium/Low/Info, but warn.
 #
 # Reports are markdown; we scrape the "Findings by Severity" summary.
+# Missing/unparseable counts must NOT default to 0 (that fail-opens).
 get_count() {
   local label="$1"
   # Matches lines like: "- **High:** 3" or "- **Critical:** 0"
   local n
   n=$(grep -E "\*\*${label}:\*\*" "$REPORT" 2>/dev/null | head -n 1 | sed -E 's/.*\*\*[^:]+:\*\* *([0-9]+).*/\1/') || true
   if [[ -z "${n:-}" || ! "$n" =~ ^[0-9]+$ ]]; then
-    echo 0
+    echo ""
   else
     echo "$n"
   fi
@@ -125,6 +127,20 @@ DEST_BASE="$STATE_DIR/skills"
 DEST_DIR="$DEST_BASE/$DEST_NAME"
 
 BLOCKED=0
+PARSE_OK=1
+if [[ -z "$CRITICAL_COUNT" || -z "$HIGH_COUNT" ]]; then
+  PARSE_OK=0
+  BLOCKED=1
+  CRITICAL_COUNT="${CRITICAL_COUNT:-0}"
+  HIGH_COUNT="${HIGH_COUNT:-0}"
+fi
+MEDIUM_COUNT="${MEDIUM_COUNT:-0}"
+LOW_COUNT="${LOW_COUNT:-0}"
+INFO_COUNT="${INFO_COUNT:-0}"
+
+if [[ "$SCAN_CODE" -ne 0 ]]; then
+  BLOCKED=1
+fi
 if [[ "$CRITICAL_COUNT" -gt 0 || "$HIGH_COUNT" -gt 0 ]]; then
   BLOCKED=1
 fi
@@ -151,8 +167,14 @@ if [[ $BLOCKED -eq 0 ]]; then
   exit 0
 fi
 
-# Blocked by policy (High/Critical present)
-echo "Scan result: BLOCKED (High/Critical findings present)" >&2
+# Blocked by policy (scanner failure, unparseable report, or High/Critical)
+if [[ "$SCAN_CODE" -ne 0 ]]; then
+  echo "Scan result: BLOCKED (scanner exited $SCAN_CODE)" >&2
+elif [[ "$PARSE_OK" -eq 0 ]]; then
+  echo "Scan result: BLOCKED (could not parse High/Critical counts from report)" >&2
+else
+  echo "Scan result: BLOCKED (High/Critical findings present)" >&2
+fi
 echo "  Critical: $CRITICAL_COUNT  High: $HIGH_COUNT  Medium: $MEDIUM_COUNT  Low: $LOW_COUNT  Info: $INFO_COUNT" >&2
 echo "Report: $REPORT" >&2
 
