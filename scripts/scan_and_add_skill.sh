@@ -50,11 +50,6 @@ while [[ $# -gt 0 ]]; do
         echo "ERROR: --name requires a value" >&2
         exit 2
       fi
-      # Sanitize DEST_NAME: alphanumeric, hyphen, underscore
-      if [[ ! "$DEST_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-        echo "ERROR: Invalid name characters (alphanumeric, hyphen, underscore only)" >&2
-        exit 2
-      fi
       shift 2
       ;;
     *)
@@ -64,6 +59,13 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# Sanitize dest name for both --name and the basename default.
+# Reject ".", "..", slashes, and anything outside [A-Za-z0-9_-].
+if [[ ! "$DEST_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+  echo "ERROR: Invalid destination name '$DEST_NAME' (alphanumeric, hyphen, underscore only)" >&2
+  exit 2
+fi
 
 STATE_DIR="${OPENCLAW_STATE_DIR:-$HOME/.openclaw}"
 WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-$STATE_DIR/workspace}"
