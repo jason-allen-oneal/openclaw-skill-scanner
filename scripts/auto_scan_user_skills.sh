@@ -1,98 +1,55 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-# Auto-scan OpenClaw user skills when ~/.openclaw/skills changes.
-# Triggered by a systemd --user path unit.
-
-STATE_DIR="${OPENCLAW_STATE_DIR:-$HOME/.openclaw}"
-WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-$STATE_DIR/workspace}"
-SCANNER_DIR="$WORKSPACE_DIR/skill-scanner"
-USER_SKILLS="$STATE_DIR/skills"
-OUT_DIR="$WORKSPACE_DIR/skill_scans/auto"
-mkdir -p "$OUT_DIR"
-TS="$(date +%Y%m%d-%H%M%S)"
-REPORT="$OUT_DIR/openclaw_user_skills_$TS.md"
-
-if [[ ! -d "$USER_SKILLS" ]]; then
-  echo "No user skills dir at $USER_SKILLS; nothing to scan."
-  exit 0
-fi
-
-if [[ ! -d "$SCANNER_DIR" ]]; then
-  echo "ERROR: skill-scanner repo not found at $SCANNER_DIR" >&2
-  exit 2
-fi
-
-cd "$SCANNER_DIR"
-
-# Run scan
-if command -v uv >/dev/null 2>&1; then
-  UV_BIN="$(command -v uv)"
-elif [[ -x "/home/linuxbrew/.linuxbrew/bin/uv" ]]; then
-  UV_BIN="/home/linuxbrew/.linuxbrew/bin/uv"
-else
-  echo "ERROR: uv not found in PATH. Install uv: https://astral.sh/uv" >&2
-  exit 2
-fi
-
-"$UV_BIN" run skill-scanner scan-all "$USER_SKILLS" --format markdown --detailed --output "$REPORT"
-
-# Print a short summary to the journal
-get_count() {
-  local label="$1"
-  local n
-  n=$(grep -E "\*\*${label}:\*\*" "$REPORT" 2>/dev/null | head -n 1 | sed -E 's/.*\*\*[^:]+:\*\* *([0-9]+).*/\1/') || true
-  if [[ -z "${n:-}" || ! "$n" =~ ^[0-9]+$ ]]; then
-    echo 0
-  else
-    echo "$n"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+source "$SCRIPT_DIR/openclaw_paths.sh"
+[[ -d "$USER_SKILLS" ]] || { echo "No managed skills directory: $USER_SKILLS"; exit 0; }
+[[ -d "$SCANNER_DIR" ]] || { echo "ERROR: Scanner repository not found: $SCANNER_DIR" >&2; exit 2; }
+UV_BIN="$(command -v uv)" || { echo 'ERROR: uv not found in PATH' >&2; exit 2; }
+umask 077
+OUT_DIR="$OUT_DIR/auto"
+mkdir -p -- "$OUT_DIR"
+INVENTORY="$(mktemp "$OUT_DIR/inventory_XXXXXXXX")"
+trap 'rm -f -- "$INVENTORY"' EXIT
+python3 "$SCRIPT_DIR/discover_skill_dirs.py" --only-roots "$USER_SKILLS" >"$INVENTORY"
+STATUS=0
+while IFS= read -r -d '' skill; do
+  REPORT="$(mktemp "$OUT_DIR/openclaw_skill_XXXXXXXX.md")"
+  if ! (cd -- "$SCANNER_DIR" && "$UV_BIN" run skill-scanner scan "$skill" --format markdown --detailed --output "$REPORT"); then
+    echo "ERROR: scan failed; no safety verdict or quarantine applied: $skill" >&2
+    STATUS=1; continue
   fi
-}
-
-CRITICAL=$(get_count "Critical")
-HIGH=$(get_count "High")
-MEDIUM=$(get_count "Medium")
-
-echo "Skill scan complete: report=$REPORT critical=$CRITICAL high=$HIGH medium=$MEDIUM"
-
-QUARANTINE_BASE="$STATE_DIR/skills-quarantine"
-
-# If High/Critical exist, quarantine failing skills (Max Severity HIGH/CRITICAL).
-if [[ "$CRITICAL" -gt 0 || "$HIGH" -gt 0 ]]; then
-  mkdir -p "$QUARANTINE_BASE"
-  echo "BLOCKING FINDINGS DETECTED (High/Critical). Quarantining affected skills. Review: $REPORT" >&2
-
-  # Parse the markdown to find failing skills and their directories.
-  # Looks for sections like:
-  #   ### [FAIL] <skill>
-  #   - **Max Severity:** HIGH
-  #   ...
-  #   - **Directory:** /path
-  mapfile -t FAIL_DIRS < <(
-    awk '
-      /^### \[FAIL\] / { fail=1; sev=""; dir="" }
-      fail && /\*\*Max Severity:\*\*/ { if (match($0, /\*\*Max Severity:\*\* ([A-Z]+)/, m)) sev=m[1] }
-      fail && /\*\*Directory:\*\*/ { if (match($0, /\*\*Directory:\*\* (.*)$/, m)) dir=m[1] }
-      fail && sev ~ /^(HIGH|CRITICAL)$/ && dir != "" { print dir; fail=0; sev=""; dir="" }
-      # End section guard
-      /^---$/ { if (fail && dir != "") { fail=0; sev=""; dir="" } }
-    ' "$REPORT" | sort -u
-  )
-
-  if [[ ${#FAIL_DIRS[@]} -eq 0 ]]; then
-    echo "High/Critical present, but could not parse failing directories from report. Leaving skills in place." >&2
-    exit 1
-  fi
-
-  for d in "${FAIL_DIRS[@]}"; do
-    if [[ -d "$d" && "$d" == "$USER_SKILLS"/* ]]; then
-      name="$(basename "$d")"
-      qdest="$QUARANTINE_BASE/${name}-$TS"
-      echo "Quarantining: $d -> $qdest" >&2
-      mv -- "$d" "$qdest"
+  COUNTS=()
+  for severity in Critical High; do
+    count=$(sed -nE "s/^[[:space:]]*[-*][[:space:]]+\\*\\*${severity}:\\*\\*[[:space:]]*([0-9]+)[[:space:]]*$/\\1/p" "$REPORT")
+    if [[ ! "$count" =~ ^[0-9]+$ || ${#count} -gt 9 ]]; then
+      echo "ERROR: missing/invalid $severity summary: $REPORT" >&2
+      STATUS=1; break
     fi
+    COUNTS+=("$((10#$count))")
   done
-
-  # Non-zero so it shows up in status, but the bad skills are now out of the load path.
-  exit 1
-fi
+  [[ ${#COUNTS[@]} -eq 2 ]] || continue
+  echo "Scan report: $REPORT critical=${COUNTS[0]} high=${COUNTS[1]}"
+  if (( COUNTS[0] > 0 || COUNTS[1] > 0 )); then
+    STATUS=1
+    # Quarantine the directory we actually scanned, never a path from report text.
+    python3 - "$USER_SKILLS" "$skill" "$QUARANTINE_BASE" <<'PY' || STATUS=1
+import os
+from pathlib import Path
+import sys
+import uuid
+root, source, quarantine = map(Path, sys.argv[1:])
+root, quarantine = root.resolve(), quarantine.resolve()
+resolved = source.resolve()
+if resolved == root or root not in resolved.parents or resolved != source.absolute():
+    raise SystemExit('Refusing quarantine outside managed skills or through a symlink')
+if quarantine == root or root in quarantine.parents:
+    raise SystemExit('Quarantine must be outside the active managed skill tree')
+quarantine.mkdir(parents=True, exist_ok=True)
+destination = quarantine / (source.name + '-' + uuid.uuid4().hex)
+# Atomic on one filesystem; a cross-device move fails without copying/deleting.
+os.rename(source, destination)
+print(f'Quarantined: {source} -> {destination}')
+PY
+  fi
+done <"$INVENTORY"
+exit "$STATUS"
