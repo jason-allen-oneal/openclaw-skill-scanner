@@ -1,6 +1,9 @@
 [Unit]
-Description=OpenClaw: scan user skills when skills directory changes
+Description=OpenClaw: scan managed skills after a directory change
 
 [Service]
 Type=oneshot
-ExecStart=%h/.openclaw/skills/skill-scanner-guard/scripts/auto_scan_user_skills.sh
+# Default installation example. Change this path for a ClawHub alias or profile.
+# Also set OPENCLAW_STATE_DIR and OPENCLAW_WORKSPACE_DIR when needed.
+ExecStart=%h/.openclaw/skills/openclaw-skill-scanner/scripts/auto_scan_user_skills.sh
+UMask=0077

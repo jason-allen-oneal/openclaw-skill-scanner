@@ -1,107 +1,83 @@
 ---
 name: openclaw-skill-scanner
-description: Security gate for OpenClaw AgentSkills. Scans folder/ClawHub skills with cisco-ai-defense/skill-scanner before installation. Supports manual scans, staged installs, and auto-quarantine of high-risk skills via systemd.
-binaries:
-  - uv
-  - npx
-  - git
-  - systemctl
-env:
-  - OPENCLAW_STATE_DIR
-  - OPENCLAW_WORKSPACE_DIR
+description: Scan local or staged ClawHub skills before installation; report High/Critical findings and optionally quarantine managed skills. A scan is not proof of safety.
+metadata: {"openclaw":{"requires":{"bins":["bash","python3","uv"]}}}
 ---
 
 # Skill Scanner Guard
 
-Harden OpenClaw’s skill supply chain:
-- Scan skills with **cisco-ai-defense/skill-scanner**
-- Block only on **High/Critical**
-- Allow **Medium/Low/Info** but warn
-- Auto-scan on changes to `~/.openclaw/skills`
-- Quarantine failing skills to `~/.openclaw/skills-quarantine`
+Use a separately reviewed installation of cisco-ai-defense/skill-scanner.
+The default scanner checkout is `<workspace>/skill-scanner`; override it with
+`SKILL_SCANNER_DIR`. These scripts do not establish that a scanner checkout,
+OpenClaw installation, or candidate skill is trustworthy. Do not execute a
+candidate skill as part of review.
 
-## Quick start
-
-### Install skill-scanner (repo + uv env)
+## Scan before installing
 
 ```bash
-cd "$HOME/.openclaw/workspace"
-# or wherever you keep repos
-
-git clone https://github.com/cisco-ai-defense/skill-scanner
-cd skill-scanner
-CC=gcc uv sync --all-extras
+bash {baseDir}/scripts/scan_and_add_skill.sh /absolute/path/to/skill
+bash {baseDir}/scripts/clawhub_scan_install.sh publisher/skill --version VERSION
 ```
 
-Note: some environments try `gcc-12` while building `yara-python`; forcing `CC=gcc` avoids that.
+ClawHub staging additionally requires `npx`. Downloads stay in a private staging
+directory outside the default skill roots. Existing destination folders are not
+replaced. High/Critical findings block; Medium/Low/Info findings allow with a
+warning. `--force` overrides findings only, never scanner errors or incomplete
+severity summaries. `--tag` is rejected rather than silently ignored.
 
-## Workflows
+These are explicit wrappers, not an interception hook for `openclaw skills
+install`, ClawHub installs performed elsewhere, skill updates, or Workshop apply.
+Never describe a successful scan as a safety guarantee.
 
-### 1) Scan all user skills (manual)
+## Scan installed skills
 
-User skills live at:
-- `~/.openclaw/skills`
-
-Run:
 ```bash
-$HOME/.openclaw/skills/skill-scanner-guard/scripts/scan_openclaw_skills.sh
+bash {baseDir}/scripts/scan_openclaw_skills.sh
+bash {baseDir}/scripts/scan_openclaw_skills.sh --only-roots /path/to/skill/root
+bash {baseDir}/scripts/scan_openclaw_skills.sh --catalog --agent main
 ```
 
-Outputs go to:
-- `/home/rev/.openclaw/workspace/skill_scans/`
+Filesystem-only mode checks managed, default workspace, project `.agents`,
+default-state personal `.agents`, workshop, and discoverable bundled sources.
+Grouped skills are discovered up to six levels deep, stopping at `SKILL.md`.
+Symlink skill directories require explicit review; discovery errors are not
+reported as a successful complete scan.
 
-### 2) Install a folder skill with scan gate (copy/clone workflow)
+`--catalog` explicitly executes the installed OpenClaw CLI. Use it only with an
+installation you trust. It uses `skills list --json` and `skills info --json` to
+include configured agent workspaces and extra/plugin/bundled sources. It does
+not inspect every user's private library, disconnected nodes, remote hosts, or
+shadowed skills outside the selected roots. Unavailable local manifests fail
+inventory creation. No candidate skill code is executed by discovery.
 
-Use the wrapper instead of copying directly:
-```bash
-$HOME/.openclaw/skills/skill-scanner-guard/scripts/scan_and_add_skill.sh /path/to/skill-dir
-```
+## Paths
 
-Policy:
-- Block only if **High/Critical** exist (unless `--force`)
-- Still installs if only Medium/Low/Info exist, but prints a warning summary
+`OPENCLAW_HOME`, `OPENCLAW_STATE_DIR`, `OPENCLAW_PROFILE`, and
+`OPENCLAW_WORKSPACE_DIR` select the layout. Named profiles do not inherit the
+default personal `.agents/skills` root. The legacy `.clawdbot` state fallback is
+retained when neither an explicit state nor a named profile is selected.
 
-### 3) Install from ClawHub with scan gate (staging install)
+Wrapper overrides: `OPENCLAW_SKILLS_DIR`, `OPENCLAW_QUARANTINE_DIR`,
+`OPENCLAW_STAGE_DIR`, `SKILL_SCANNER_DIR`, `SKILL_SCANNER_REPORT_DIR`,
+`OPENCLAW_BUNDLED_SKILLS_DIR`, and `OPENCLAW_BIN` (one executable, not a shell
+command). Per-agent configuration is resolved through explicit catalog mode,
+not by guessing or evaluating OpenClaw configuration files.
 
-Install to a staging dir, scan, then copy into `~/.openclaw/skills` only if allowed:
-```bash
-$HOME/.openclaw/skills/skill-scanner-guard/scripts/clawhub_scan_install.sh <slug>
-# optionally
-$HOME/.openclaw/skills/skill-scanner-guard/scripts/clawhub_scan_install.sh <slug> --version <version>
-```
+Reports default to `<workspace>/skill_scans`; managed installs to
+`<state>/skills`; quarantine to `<state>/skills-quarantine`.
 
-### 4) Auto-scan + quarantine on change (systemd user units)
+## Optional systemd watcher
 
-Install the units (templates are in `references/`):
-```bash
-mkdir -p ~/.config/systemd/user
-cp -a "$HOME/.openclaw/skills/skill-scanner-guard/references/openclaw-skill-scan."* ~/.config/systemd/user/
+The units in `references/` are templates for the default Linux user layout.
+Review the `ExecStart` and watched paths before enabling them, especially with
+a profile, custom workspace, or renamed installation directory. Environment
+variables are not expanded inside systemd path directives. A path unit is not
+a recursive watcher and does not guarantee interception before a skill loads.
 
-systemctl --user daemon-reload
-systemctl --user enable --now openclaw-skill-scan.path
-```
+`auto_scan_user_skills.sh` scans grouped managed skills individually and
+quarantines High/Critical results outside the managed skill tree. It never
+accepts quarantine paths from report text. Failed scans and malformed reports
+return nonzero without declaring skills safe. Cross-filesystem quarantine is
+refused rather than performed as a non-atomic copy/delete.
 
-Behavior:
-- Any change under `~/.openclaw/skills/` triggers `scripts/auto_scan_user_skills.sh`
-- If High/Critical findings exist, the script moves failing skill directories to:
-  `~/.openclaw/skills-quarantine/<skillname>-<timestamp>`
-- Reports are written to:
-  `/home/rev/.openclaw/workspace/skill_scans/auto/`
-
-Inspect:
-```bash
-systemctl --user status openclaw-skill-scan.path
-journalctl --user -u openclaw-skill-scan.service -n 100 --no-pager
-ls -la ~/.openclaw/skills-quarantine
-```
-
-## Bundled resources
-
-### scripts/
-- `scan_openclaw_skills.sh`: generate markdown reports for user + bundled skills
-- `scan_and_add_skill.sh`: scan candidate folder skill; install only if allowed
-- `clawhub_scan_install.sh`: stage-install from ClawHub, scan, then install
-- `auto_scan_user_skills.sh`: scan-all on `~/.openclaw/skills` changes; quarantine High/Critical failures
-
-### references/
-- `openclaw-skill-scan.path` / `openclaw-skill-scan.service`: systemd --user path trigger units
+See `COMPATIBILITY.md` for the upstream reference and test scope.
